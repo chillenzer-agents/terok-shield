@@ -487,7 +487,7 @@ class HookMode:
         set_timeout = NFT_SET_TIMEOUT_DNSMASQ if tier.live else ""
         ruleset_builder = RulesetBuilder(
             dns=upstream_dns,
-            loopback_ports=StateBundle(sd).read_loopback_ports(),
+            loopback_ports=StateBundle(sd).effective_loopback_ports(),
             gateway_v4=gw_v4,
             gateway_v6=gw_v6,
             set_timeout=set_timeout,
@@ -957,7 +957,7 @@ class HookMode:
         gw_v4, gw_v6 = self._gateways
         return RulesetBuilder(
             dns=dns,
-            loopback_ports=StateBundle(sd).read_loopback_ports(),
+            loopback_ports=StateBundle(sd).effective_loopback_ports(),
             gateway_v4=gw_v4,
             gateway_v6=gw_v6,
             set_timeout=set_timeout,

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Wire the reserved `+localhost:PORT` host-service grant into the ruleset: the
+  ports from every tier now reach the nft preamble's host-loopback accept rules.
+  Previously `+localhost:PORT` parsed and resolved but had no consumer, so the
+  grant was a silent no-op (`shield.allow: [localhost:2222]` never opened the
+  port).
+
 ## v0.9.0 (unreleased)
 
 - Own setup receipts and bind standalone global hooks to the setup interpreter.

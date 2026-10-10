@@ -860,6 +860,35 @@ def test_pre_start_writes_ruleset_nft(
     assert "terok_shield" in content
 
 
+@mock.patch("terok_shield.hooks.mode.HooksInstaller.check_setup", return_value=())
+def test_pre_start_wires_localhost_grant_into_ruleset(
+    _has_hooks: mock.Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    make_hook_mode: HookModeHarnessFactory,
+    make_config: ConfigFactory,
+) -> None:
+    """A ``+localhost:PORT`` grant reaches the nft preamble (the host-service grant).
+
+    Regression: ``EffectivePolicy.localhost_ports()`` was documented as "fed to
+    the builder's ``loopback_ports``" but had no caller, so a
+    ``shield.allow: [localhost:2222]`` grant parsed and resolved yet never
+    emitted the ``tcp dport 2222 ... accept`` preamble rule — making it a
+    silent no-op.
+    """
+    _set_euid(monkeypatch, 0)
+    config = make_config()
+    harness = make_hook_mode(config=config)
+    harness.runner.run.return_value = _MODERN_PODMAN_INFO
+    harness.profiles.compose_profiles.return_value = []
+
+    harness.mode.pre_start("test", ["dev-standard"], project_allow=["localhost:2222"])
+
+    content = StateBundle(config.state_dir).ruleset.read_text()
+    assert f"tcp dport 2222 ip daddr {PASTA_HOST_LOOPBACK_MAP} accept" in content, (
+        "the +localhost:2222 host-service grant must emit a preamble accept rule"
+    )
+
+
 def test_hooks_installer_writes_role_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``HooksInstaller.install()`` lays down nft + reader hooks, ballast, and reader resource."""
     from terok_shield.hooks.install import HooksInstaller

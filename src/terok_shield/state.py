@@ -315,6 +315,20 @@ class StateBundle:
             if line.strip()
         )
 
+    def effective_loopback_ports(self) -> tuple[int, ...]:
+        """Every port the ruleset preamble must accept on the host-loopback map.
+
+        The union of the per-container ``loopback.ports`` file (the
+        gate/broker/signer triple the supervisor binds) and the reserved
+        ``+localhost:PORT`` host-service grants across every authored tier.
+        The grants live in the policy bundle, not ``loopback.ports``, so
+        without this union a ``+localhost:PORT`` entry would parse and
+        resolve but never reach the nft preamble.  Order-preserving; the
+        first occurrence of a port wins.
+        """
+        merged = (*self.read_loopback_ports(), *self.read_effective().localhost_ports())
+        return tuple(dict.fromkeys(merged))
+
     # ── v15 tiered policy bundle ────────────────────────────
 
     @property

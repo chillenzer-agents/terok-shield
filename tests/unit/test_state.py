@@ -359,6 +359,30 @@ def test_effective_policy_localhost_ports_span_every_tier(tmp_path: Path) -> Non
     assert bundle.read_effective().localhost_ports() == (8000, 9090)
 
 
+def test_effective_loopback_ports_unions_grant_with_persisted(tmp_path: Path) -> None:
+    """The ruleset preamble ports union the supervisor triple and ``+localhost:PORT`` grants.
+
+    A ``+localhost:PORT`` grant lives in the policy bundle, not
+    ``loopback.ports``; without this union it would parse, resolve, and still
+    never reach the nft preamble (the host-service grant would be a no-op).
+    """
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.loopback_ports.write_text("31000\n31001\n")
+    bundle.write_tier("project_allow", "+localhost:2222\n")
+    assert bundle.effective_loopback_ports() == (31000, 31001, 2222)
+
+
+def test_effective_loopback_ports_dedupes_and_handles_empty(tmp_path: Path) -> None:
+    """An empty bundle yields no ports; a grant already in ``loopback.ports`` is not repeated."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    assert bundle.effective_loopback_ports() == ()
+    bundle.loopback_ports.write_text("2222\n")
+    bundle.write_tier("project_allow", "+localhost:2222\n")
+    assert bundle.effective_loopback_ports() == (2222,)
+
+
 def test_effective_policy_composes_ips_and_domains_by_action(tmp_path: Path) -> None:
     """Compose folds live into its tiers and splits IPs/domains, allow minus deny."""
     bundle = StateBundle(tmp_path)
