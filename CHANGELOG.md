@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Reap and disambiguate the per-container dnsmasq across container
+  re-creation. When a task id (and its shield state dir) is reused, a dnsmasq
+  left by the previous container was matched by the ``dnsmasq.pid`` +
+  ``--conf-file`` identity and treated as "already running", so the new
+  container's ``createRuntime`` hook skipped the launch and DNS was dead
+  despite a ``127.0.0.1`` resolv.conf. `is_our_dnsmasq` now also matches the
+  network-namespace inode, and `poststop` signals through ``podman unshare``
+  when the process is owned by the container's mapped root (a host subuid) and
+  the operator uid gets ``EPERM`` — the original leak that made the orphan
+  survive.
 - Wire the reserved `+localhost:PORT` host-service grant into the ruleset: the
   ports from every tier now reach the nft preamble's host-loopback accept rules.
   Previously `+localhost:PORT` parsed and resolved but had no consumer, so the

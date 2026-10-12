@@ -146,6 +146,23 @@ def _createruntime(pid: str, sd: Path) -> None:
     _start_container_dnsmasq(pid, sd)
 
 
+def _container_netns_inode(pid: str) -> int | None:
+    """Network-namespace inode of the target container's init process.
+
+    The hook itself runs on the host (or in podman's rootless userns), *not*
+    inside the container's netns — it enters that netns with ``nsenter``.  The
+    container's netns identity is therefore ``/proc/<pid>/ns/net`` for the OCI
+    ``pid``, which is what a live dnsmasq must share.  ``None`` when
+    unreadable, which disables the netns guard rather than producing a false
+    mismatch.
+    """
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return None
+    return _oci_state.netns_inode(pid_int)
+
+
 def _start_container_dnsmasq(pid: str, sd: Path) -> None:
     """Launch dnsmasq in the container's netns and verify it started.
 
@@ -168,12 +185,14 @@ def _start_container_dnsmasq(pid: str, sd: Path) -> None:
         return
 
     pid_file = sd / _oci_state.DNSMASQ_PID_FILE_NAME
-    # Idempotent: if a dnsmasq is already running against our conf
-    # (because the hook fired twice — restart, re-dispatch, sibling
-    # hook re-entry, etc.), don't try to bind port 53 again.  Verifying
-    # pid + conf-arg avoids hitting an unrelated process that happens
-    # to hold the recycled PID.
-    if _our_dnsmasq_alive(pid_file, sd):
+    # Idempotent: if a dnsmasq is already running against our conf **in the
+    # target container's netns** (because the hook fired twice — restart,
+    # re-dispatch, sibling hook re-entry, etc.), don't try to bind port 53
+    # again.  The netns guard matters on re-creation: the PID/conf identity
+    # alone would match an orphan left in the previous container's netns by a
+    # failed poststop reap, which would wrongly suppress this launch and leave
+    # the new container with no resolver.
+    if _our_dnsmasq_alive(pid_file, sd, _container_netns_inode(pid)):
         return
 
     # Add the dnsmasq listen address to ``lo`` for non-loopback binds.
@@ -232,9 +251,11 @@ def _poststop(sd: Path) -> None:
         return
     # Escalate and report: a silently-leaked dnsmasq per container stop is
     # invisible to the operator, and EPERM here (userns mismatch) would
-    # otherwise vanish into a bare except.
+    # otherwise vanish into a bare except.  Signal through ``podman unshare``
+    # because the dnsmasq is owned by the container's mapped root (a host
+    # subuid), which the operator uid cannot kill directly.
     try:
-        os.kill(pid_int, signal.SIGTERM)
+        _oci_state.signal_dnsmasq(pid_int, signal.SIGTERM)
     except OSError as exc:
         _oci_state.log(f"poststop: SIGTERM dnsmasq[{pid_int}] failed: {exc}", sd / "hook-error.log")
         return
@@ -243,7 +264,7 @@ def _poststop(sd: Path) -> None:
             return
         time.sleep(0.1)
     try:
-        os.kill(pid_int, signal.SIGKILL)
+        _oci_state.signal_dnsmasq(pid_int, signal.SIGKILL)
         _oci_state.log(
             f"poststop: dnsmasq[{pid_int}] survived SIGTERM — sent SIGKILL",
             sd / "hook-error.log",
@@ -252,13 +273,19 @@ def _poststop(sd: Path) -> None:
         _oci_state.log(f"poststop: SIGKILL dnsmasq[{pid_int}] failed: {exc}", sd / "hook-error.log")
 
 
-def _our_dnsmasq_alive(pid_file: Path, sd: Path) -> bool:
-    """``True`` when ``pid_file`` names a live dnsmasq of this container."""
+def _our_dnsmasq_alive(pid_file: Path, sd: Path, expected_netns: int | None = None) -> bool:
+    """``True`` when ``pid_file`` names a live dnsmasq of this container.
+
+    *expected_netns* (a network-namespace inode) additionally requires the
+    process to share the target container's netns, so an orphan matching only
+    on argv/conf — left in a stale netns by a previous container that reused
+    this state dir — is correctly reported as *not* alive.
+    """
     try:
         pid_int = int(pid_file.read_text().strip())
     except (OSError, ValueError):
         return False
-    return _oci_state.is_our_dnsmasq(pid_int, sd)
+    return _oci_state.is_our_dnsmasq(pid_int, sd, expected_netns=expected_netns)
 
 
 if __name__ == "__main__":  # pragma: no cover

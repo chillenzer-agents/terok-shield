@@ -448,6 +448,65 @@ def pid_exists(pid: int) -> bool:
     return True
 
 
+def signal_dnsmasq(pid_int: int, sig: int) -> None:
+    """Signal the per-container dnsmasq, escalating through the rootless userns.
+
+    The dnsmasq is launched by the ``createRuntime`` hook, which crun runs
+    inside ``NS_ROOTLESS``; the process is owned by the container's mapped root
+    — a **subuid** on the host (e.g. ``165533``), not the operator's uid.  A
+    plain ``os.kill`` from the operator uid (uid 1000, as ``poststop`` runs)
+    can therefore fail with ``EPERM``.  (An earlier version swallowed that
+    EPERM, leaking the process across container re-creation.)
+
+    Strategy: try ``os.kill`` first — it is correct and cheapest in the common
+    case (hook running inside ``NS_ROOTLESS``, or init-userns root).  On
+    ``EPERM``, retry via ``podman unshare kill``, which re-enters
+    ``NS_ROOTLESS`` to regain ``CAP_KILL`` over the mapped uid, mirroring the
+    dispatch in ``nsenter()``.  Raises the final ``OSError`` so the caller can
+    log it.
+    """
+    try:
+        os.kill(pid_int, sig)  # NOSONAR — deliberate signal to a known pid
+        return
+    except ProcessLookupError:
+        raise
+    except PermissionError:
+        pass
+    if os.getuid() == 0:
+        # Already root (or userns-root) and still EPERM: nothing further to try.
+        raise PermissionError(f"cannot signal pid {pid_int}: operation not permitted")
+    kill = _which_optional("kill")
+    if kill is None:
+        raise PermissionError(
+            f"cannot signal pid {pid_int}: operation not permitted and no 'kill' on PATH"
+        )
+    ns_cmd = [find_podman(), "unshare", kill, f"-{int(sig)}", str(pid_int)]
+    try:
+        result = subprocess.run(  # noqa: S603  # nosec B603
+            ns_cmd, text=True, capture_output=True, timeout=30
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"podman unshare kill timed out for pid {pid_int}") from None
+    if result.returncode != 0:
+        combined = (result.stderr + result.stdout).strip() or f"exit {result.returncode}"
+        if "not permitted" in combined.lower() or "permission denied" in combined.lower():
+            raise PermissionError(combined)
+        raise RuntimeError(f"podman unshare kill failed for pid {pid_int}: {combined}")
+
+
+def _which_optional(name: str) -> str | None:
+    """Resolve an optional host tool; ``None`` when absent.
+
+    ``find_binary`` (``require_host_tool``) raises when the tool is absent; this
+    variant returns ``None`` so an optional accelerator (e.g. ``kill``) can be
+    skipped gracefully.
+    """
+    try:
+        return find_binary(name)
+    except (FileNotFoundError, RuntimeError):
+        return None
+
+
 # ── Binary finders ───────────────────────────────────────
 
 
@@ -478,7 +537,21 @@ def find_dnsmasq(state_dir: Path) -> str:
     return find_binary((state_dir / DNSMASQ_COMMAND_FILE_NAME).read_text().strip())
 
 
-def is_our_dnsmasq(pid_int: int, state_dir: Path) -> bool:
+def netns_inode(pid: int) -> int | None:
+    """Return the inode of *pid*'s network namespace, or ``None`` if unreadable.
+
+    ``stat("/proc/<pid>/ns/net").st_ino`` is the kernel's netns identity; two
+    processes share a network namespace iff their inodes match.  Used to tell
+    a live dnsmasq of *this* container apart from an orphan left in a stale
+    netns by a previous container that reused the same task id / state dir.
+    """
+    try:
+        return os.stat(f"/proc/{pid}/ns/net").st_ino
+    except OSError:
+        return None
+
+
+def is_our_dnsmasq(pid_int: int, state_dir: Path, expected_netns: int | None = None) -> bool:
     """True when *pid_int* runs the recorded dnsmasq binary on this container's config.
 
     Matches argv[0] and the ``--conf-file=`` argument exactly, so a monitoring
@@ -486,12 +559,21 @@ def is_our_dnsmasq(pid_int: int, state_dir: Path) -> bool:
     bundle from before the binary was recorded accepts any ``dnsmasq`` on
     this config, so a container started before the upgrade is still reaped
     on stop.
+
+    *expected_netns*, when given, additionally requires the process to live in
+    that network namespace.  A dnsmasq that matches the argv/conf but sits in a
+    *different* netns (an orphan from a previous container whose state dir was
+    reused) is **not** ours: it cannot serve this container's ``:53`` and must
+    not satisfy the "already running" fast path.  Awareness of the netns is
+    what makes idempotency safe across container re-creation.
     """
     try:
         argv = Path(f"/proc/{pid_int}/cmdline").read_bytes().rstrip(b"\x00").split(b"\x00")
     except OSError:
         return False
     if f"--conf-file={state_dir / DNSMASQ_CONF_FILE_NAME}".encode() not in argv:
+        return False
+    if expected_netns is not None and netns_inode(pid_int) != expected_netns:
         return False
     try:
         return argv[0] == (state_dir / DNSMASQ_BIN_FILE_NAME).read_text().strip().encode()

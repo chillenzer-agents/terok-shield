@@ -531,6 +531,147 @@ def test_is_our_dnsmasq_reaps_a_container_from_before_the_binary_was_recorded(
         assert _oci_state.is_our_dnsmasq(1234, tmp_path) is False
 
 
+# ── netns identity (orphan detection) ────────────────────────────────────────
+
+
+def test_is_our_dnsmasq_rejects_a_process_in_another_netns(tmp_path: Path) -> None:
+    """An argv/conf match in a *different* netns is an orphan, not our dnsmasq.
+
+    The PID file is keyed by task id and reused on re-creation; a leaked
+    dnsmasq from the previous container matches argv/conf but lives in the old
+    netns and cannot serve this container's :53.
+    """
+    cmdline = _recorded(tmp_path, "/home/op/.local/bin/dnsmasq")
+    with (
+        mock.patch.object(_oci_state.Path, "read_bytes", return_value=cmdline),
+        mock.patch.object(_oci_state, "netns_inode", return_value=222),
+    ):
+        assert _oci_state.is_our_dnsmasq(1234, tmp_path, expected_netns=222) is True
+        assert _oci_state.is_our_dnsmasq(1234, tmp_path, expected_netns=111) is False
+
+
+def test_is_our_dnsmasq_netns_guard_disabled_when_unknown(tmp_path: Path) -> None:
+    """No expected netns (unreadable) disables the guard rather than false-rejecting."""
+    cmdline = _recorded(tmp_path, "/home/op/.local/bin/dnsmasq")
+    with mock.patch.object(_oci_state.Path, "read_bytes", return_value=cmdline):
+        assert _oci_state.is_our_dnsmasq(1234, tmp_path, expected_netns=None) is True
+
+
+def test_netns_inode_none_when_unreadable() -> None:
+    """netns_inode() returns None (not an exception) for an unreadable /proc entry."""
+    with mock.patch.object(_oci_state.os, "stat", side_effect=OSError("gone")):
+        assert _oci_state.netns_inode(999999) is None
+
+
+def test_createruntime_relaunches_over_an_orphan_from_a_stale_netns(tmp_path: Path) -> None:
+    """A matching-but-foreign netns dnsmasq does not satisfy the alive fast path.
+
+    Regression for the reused-task-id trap: the orphan matches argv/conf, so a
+    netns-blind identity check would skip the launch and leave the new
+    container with a dead resolver.
+    """
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    (sd / "ruleset.nft").write_text("table inet terok_shield {}")
+    (sd / "dnsmasq.conf").write_text("[dnsmasq config]")
+    (sd / "dnsmasq.command").write_text("dnsmasq\n")
+    (sd / "dnsmasq.pid").write_text("4242\n")  # orphan's pid
+
+    launched: list[tuple[str, ...]] = []
+
+    def _fake_nsenter(*args: object, **kwargs: object) -> None:
+        if any("conf-file" in str(a) for a in args):
+            launched.append(args)  # type: ignore[arg-type]
+            (sd / "dnsmasq.pid").write_text("9001\n")
+
+    def _is_ours(pid_int: int, _sd: Path, expected_netns: int | None = None) -> bool:
+        # Orphan 4242: right argv, foreign netns -> not ours. New pid -> ours.
+        return pid_int != 4242
+
+    with (
+        mock.patch("terok_shield.resources._oci_state.nsenter", side_effect=_fake_nsenter),
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", side_effect=_is_ours),
+        mock.patch("terok_shield.resources.nft_hook._container_netns_inode", return_value=222),
+    ):
+        nft_hook._createruntime("1", sd)
+
+    assert launched, "dnsmasq must be launched despite the foreign-netns pid file"
+    assert (sd / "dnsmasq.pid").read_text().strip() == "9001"
+
+
+def test_createruntime_skips_launch_when_same_netns_dnsmasq_alive(tmp_path: Path) -> None:
+    """A genuine same-netns live dnsmasq still short-circuits the launch (idempotency)."""
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    (sd / "ruleset.nft").write_text("table inet terok_shield {}")
+    (sd / "dnsmasq.conf").write_text("[dnsmasq config]")
+    (sd / "dnsmasq.command").write_text("dnsmasq\n")
+    (sd / "dnsmasq.pid").write_text("4242\n")
+
+    with (
+        mock.patch("terok_shield.resources._oci_state.nsenter") as mock_ns,
+        mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=True),
+        mock.patch("terok_shield.resources.nft_hook._container_netns_inode", return_value=222),
+    ):
+        nft_hook._createruntime("1", sd)
+
+    assert mock_ns.call_count == 1  # ruleset only
+    assert "dnsmasq" not in str(mock_ns.call_args_list[0])
+
+
+# ── signal_dnsmasq (rootless-userns reap) ────────────────────────────────────
+
+
+def test_signal_dnsmasq_uses_os_kill_when_permitted() -> None:
+    """The common case signals directly and never shells out to podman."""
+    with (
+        mock.patch.object(_oci_state.os, "kill") as mock_kill,
+        mock.patch.object(_oci_state, "_which_optional") as mock_which,
+    ):
+        _oci_state.signal_dnsmasq(4242, 15)
+
+    mock_kill.assert_called_once_with(4242, 15)
+    mock_which.assert_not_called()
+
+
+def test_signal_dnsmasq_escalates_through_podman_unshare_on_eperm() -> None:
+    """EPERM (subuid-owned dnsmasq) is retried via ``podman unshare kill``."""
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    with (
+        mock.patch.object(_oci_state.os, "kill", side_effect=PermissionError("EPERM")),
+        mock.patch.object(_oci_state, "find_podman", return_value="/usr/bin/podman"),
+        mock.patch.object(_oci_state, "_which_optional", return_value="/usr/bin/kill"),
+        mock.patch.object(_oci_state.subprocess, "run", return_value=completed) as mock_run,
+    ):
+        _oci_state.signal_dnsmasq(4242, 15)
+
+    argv = mock_run.call_args.args[0]
+    assert argv[:3] == ["/usr/bin/podman", "unshare", "/usr/bin/kill"]
+    assert argv[-2:] == ["-15", "4242"]
+
+
+def test_signal_dnsmasq_reraises_eperm_when_userns_also_denied() -> None:
+    """If the userns retry is also denied, a PermissionError surfaces for logging."""
+    denied = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="", stderr="kill: (4242) - Operation not permitted"
+    )
+    with (
+        mock.patch.object(_oci_state.os, "kill", side_effect=PermissionError("EPERM")),
+        mock.patch.object(_oci_state, "find_podman", return_value="/usr/bin/podman"),
+        mock.patch.object(_oci_state, "_which_optional", return_value="/usr/bin/kill"),
+        mock.patch.object(_oci_state.subprocess, "run", return_value=denied),
+    ):
+        with pytest.raises(PermissionError):
+            _oci_state.signal_dnsmasq(4242, 9)
+
+
+def test_signal_dnsmasq_propagates_process_lookup_error() -> None:
+    """A process that is already gone raises ProcessLookupError to the caller."""
+    with mock.patch.object(_oci_state.os, "kill", side_effect=ProcessLookupError):
+        with pytest.raises(ProcessLookupError):
+            _oci_state.signal_dnsmasq(4242, 15)
+
+
 # ── _poststop ─────────────────────────────────────────────────────────────────
 
 
@@ -545,11 +686,11 @@ def test_poststop_sends_sigterm_to_dnsmasq(tmp_path: Path) -> None:
             "terok_shield.resources._oci_state.is_our_dnsmasq",
             side_effect=[True, False],  # identity check passes; first poll sees it gone
         ),
-        mock.patch("terok_shield.resources._oci_state.os.kill") as mock_kill,
+        mock.patch("terok_shield.resources._oci_state.signal_dnsmasq") as mock_sig,
     ):
         nft_hook._poststop(sd)
 
-    mock_kill.assert_called_once_with(12345, 15)
+    mock_sig.assert_called_once_with(12345, 15)
 
 
 def test_poststop_escalates_to_sigkill(tmp_path: Path) -> None:
@@ -561,12 +702,12 @@ def test_poststop_escalates_to_sigkill(tmp_path: Path) -> None:
     with (
         mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=True),
         mock.patch("terok_shield.resources.nft_hook.time.sleep"),
-        mock.patch("terok_shield.resources._oci_state.os.kill") as mock_kill,
+        mock.patch("terok_shield.resources._oci_state.signal_dnsmasq") as mock_sig,
         mock.patch("terok_shield.resources._oci_state.log") as mock_log,
     ):
         nft_hook._poststop(sd)
 
-    assert mock_kill.call_args_list == [mock.call(12345, 15), mock.call(12345, 9)]
+    assert mock_sig.call_args_list == [mock.call(12345, 15), mock.call(12345, 9)]
     assert any("SIGKILL" in str(c) for c in mock_log.call_args_list)
 
 
@@ -580,7 +721,7 @@ def test_poststop_reports_failed_sigkill(tmp_path: Path) -> None:
         mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=True),
         mock.patch("terok_shield.resources.nft_hook.time.sleep"),
         mock.patch(
-            "terok_shield.resources._oci_state.os.kill",
+            "terok_shield.resources._oci_state.signal_dnsmasq",
             side_effect=[None, OSError("EPERM")],
         ),
         mock.patch("terok_shield.resources._oci_state.log") as mock_log,
@@ -599,11 +740,11 @@ def test_poststop_skips_stale_pid(tmp_path: Path) -> None:
 
     with (
         mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=False),
-        mock.patch("terok_shield.resources._oci_state.os.kill") as mock_kill,
+        mock.patch("terok_shield.resources._oci_state.signal_dnsmasq") as mock_sig,
     ):
         nft_hook._poststop(sd)
 
-    mock_kill.assert_not_called()
+    mock_sig.assert_not_called()
     assert not pid_file.exists(), "stale PID file must be removed when identity check fails"
 
 
@@ -629,7 +770,7 @@ def test_poststop_is_noop_when_pid_file_absent(tmp_path: Path) -> None:
 
 
 def test_poststop_ignores_oserror_on_kill(tmp_path: Path) -> None:
-    """_poststop() swallows OSError from os.kill (process already gone)."""
+    """_poststop() swallows OSError from the signal path (process already gone)."""
     sd = tmp_path / "sd"
     sd.mkdir()
     (sd / "dnsmasq.pid").write_text("99999\n")
@@ -637,9 +778,10 @@ def test_poststop_ignores_oserror_on_kill(tmp_path: Path) -> None:
     with (
         mock.patch("terok_shield.resources._oci_state.is_our_dnsmasq", return_value=True),
         mock.patch(
-            "terok_shield.resources._oci_state.os.kill",
+            "terok_shield.resources._oci_state.signal_dnsmasq",
             side_effect=OSError,
         ),
+        mock.patch("terok_shield.resources._oci_state.log"),
     ):
         nft_hook._poststop(sd)  # must not raise
 

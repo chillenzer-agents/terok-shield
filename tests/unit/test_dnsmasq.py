@@ -362,7 +362,7 @@ def test_terminate_sigterms_then_sigkills(tmp_path: Path) -> None:
 
     with (
         mock.patch("terok_shield.dns.dnsmasq.is_our_dnsmasq", return_value=True),  # never dies
-        mock.patch("terok_shield.dns.dnsmasq.os.kill") as mock_kill,
+        mock.patch("terok_shield.dns.dnsmasq.signal_dnsmasq") as mock_kill,
         mock.patch("terok_shield.dns.dnsmasq.time.sleep"),
     ):
         _terminate(12345, tmp_path, timeout_s=0.0)
@@ -389,7 +389,7 @@ def test_terminate_stops_at_sigterm_when_the_process_exits(tmp_path: Path) -> No
 
     with (
         mock.patch("terok_shield.dns.dnsmasq.is_our_dnsmasq", return_value=False),  # gone
-        mock.patch("terok_shield.dns.dnsmasq.os.kill") as mock_kill,
+        mock.patch("terok_shield.dns.dnsmasq.signal_dnsmasq") as mock_kill,
     ):
         _terminate(12345, tmp_path)
 

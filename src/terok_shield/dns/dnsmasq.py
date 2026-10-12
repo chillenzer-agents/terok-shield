@@ -31,7 +31,7 @@ from pathlib import Path
 from terok_util import require_host_tool
 
 from ..nft.constants import DNSMASQ_BIND_DEFAULT, NFT_TABLE_NAME, TIER_PROJECT_ALLOW
-from ..resources._oci_state import is_our_dnsmasq
+from ..resources._oci_state import is_our_dnsmasq, signal_dnsmasq
 from ..run import CommandRunner, ShieldNeedsSetup
 from ..state import StateBundle
 
@@ -148,16 +148,21 @@ def reload(
 
 
 def _terminate(pid_int: int, state_dir: Path, timeout_s: float = 2.0) -> None:
-    """SIGTERM *pid_int*, wait for it to exit, then SIGKILL as a last resort."""
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid_int, signal.SIGTERM)
+    """SIGTERM *pid_int*, wait for it to exit, then SIGKILL as a last resort.
+
+    Signals through :func:`signal_dnsmasq`, which escalates via ``podman
+    unshare`` when the process is owned by the container's mapped root (a host
+    subuid) and the operator uid gets ``EPERM``.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        signal_dnsmasq(pid_int, signal.SIGTERM)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if not is_our_dnsmasq(pid_int, state_dir):
             return
         time.sleep(0.05)
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid_int, signal.SIGKILL)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        signal_dnsmasq(pid_int, signal.SIGKILL)
 
 
 def _await_restart(state_dir: Path, timeout_s: float = 2.0) -> None:
