@@ -17,6 +17,18 @@
   Previously `+localhost:PORT` parsed and resolved but had no consumer, so the
   grant was a silent no-op (`shield.allow: [localhost:2222]` never opened the
   port).
+- Choose the per-container DNS upstream from the task's **actual** network
+  namespace, not just the host-global mode. A `TEROK_SHIELD_DNS_UPSTREAM`
+  IP-literal override (loopback and link-local/IMDS literals rejected) wins at
+  `pre_start`; at `createRuntime` a functional UDP DNS probe run inside the
+  container netns switches an unusable mode-derived forwarder — e.g. pasta's
+  `169.254.1.1` under a non-pasta netns answers `REFUSED` for every recursive
+  name — to `1.1.1.1`/`8.8.8.8`, rewriting `dnsmasq.conf`/`resolv.conf` before
+  dnsmasq starts. The fallback `:53` accepts are emitted below the t20
+  deny/private rejects, so an explicit `shield deny` of a fallback still wins.
+  Note: an already-installed hook script (upgrade without re-running
+  `terok setup`) still launches the old hook, so the runtime verification is
+  skipped silently and the extra fallback accepts are inert.
 
 ## v0.9.0 (unreleased)
 

@@ -22,6 +22,7 @@ Bundle layout::
     ├── deny_resolved.ips              # derived: resolved t20 security-deny IPs (deny seed)
     ├── ruleset.nft                    # pre-generated nft ruleset (gateways baked in)
     ├── upstream.dns                   # upstream DNS address
+    ├── upstream.explicit              # marker: upstream came from the env override
     ├── dns.tier                       # active DNS tier
     ├── dnsmasq.command                # symbolic/operator launch choice
     ├── dnsmasq.bin                    # live executable identity for cleanup
@@ -57,6 +58,7 @@ from .resources._oci_state import (
     DNSMASQ_COMMAND_FILE_NAME,
     DNSMASQ_CONF_FILE_NAME,
     DNSMASQ_PID_FILE_NAME,
+    UPSTREAM_EXPLICIT_FILE_NAME,
 )
 
 
@@ -263,6 +265,17 @@ class StateBundle:
     def upstream_dns(self) -> Path:
         """Path to the persisted upstream DNS address."""
         return self.state_dir / "upstream.dns"
+
+    @property
+    def upstream_explicit(self) -> Path:
+        """Path to the explicit-upstream marker (present = operator override).
+
+        ``pre_start`` writes it only when ``TEROK_SHIELD_DNS_UPSTREAM`` supplied
+        the upstream; the nsenter runtime check reads its presence to skip the
+        usability probe even if the child does not inherit the hook's
+        environment (the override is the operator's word, honored regardless).
+        """
+        return self.state_dir / UPSTREAM_EXPLICIT_FILE_NAME
 
     @property
     def dns_tier(self) -> Path:

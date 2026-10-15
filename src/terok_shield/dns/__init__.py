@@ -6,4 +6,5 @@
 Collaborators:
     resolver — stateless DNS resolution with dig/getent
     dnsmasq — dnsmasq configuration generation, lifecycle, and nftset integration
+    upstream — usable-upstream selection (env override + netns-verified fallback)
 """

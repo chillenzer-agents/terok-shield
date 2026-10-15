@@ -20,6 +20,8 @@ Keep in sync with the package-side definitions:
 * ``ANN_STATE_DIR``      ↔ ``terok_shield.config.ANNOTATION_STATE_DIR_KEY``
 * ``ANN_VERSION``        ↔ ``terok_shield.config.ANNOTATION_VERSION_KEY``
 * ``META_PATH_FILE_NAME`` ↔ ``terok_shield.state.meta_path_file``
+* ``UPSTREAM_DNS_FILE_NAME`` ↔ ``terok_shield.state.StateBundle.upstream_dns``
+* ``UPSTREAM_EXPLICIT_FILE_NAME`` ↔ ``terok_shield.state.StateBundle.upstream_explicit``
 """
 
 from __future__ import annotations
@@ -89,6 +91,18 @@ DNSMASQ_BIN_FILE_NAME = "dnsmasq.bin"
 
 DNSMASQ_COMMAND_FILE_NAME = "dnsmasq.command"
 """Symbolic dnsmasq name, or an explicit operator-provided binary override."""
+
+UPSTREAM_DNS_FILE_NAME = "upstream.dns"
+"""Persisted upstream DNS address, written by ``pre_start`` and coexisting with
+a non-dnsmasq tier's bound ``resolv.conf``.  Its presence is also the hook's
+signal that runtime upstream verification applies — a bundle without it was
+prepared before this feature or outside ``pre_start``."""
+
+UPSTREAM_EXPLICIT_FILE_NAME = "upstream.explicit"
+"""Marker (present = operator override) written by ``pre_start`` when the
+upstream came from ``TEROK_SHIELD_DNS_UPSTREAM``.  The runtime verification
+consults it so an explicit override is honoured even when the nsenter child
+does not inherit the hook's environment."""
 
 META_PATH_FILE_NAME = "meta_path"
 """Per-container pointer to the orchestrator's wire-dossier JSON.

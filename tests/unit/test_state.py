@@ -36,6 +36,9 @@ def test_bundle_version_is_positive_int() -> None:
         pytest.param("dnsmasq_conf", FAKE_STATE_DIR / "dnsmasq.conf", id="dnsmasq-conf"),
         pytest.param("dnsmasq_pid", FAKE_STATE_DIR / "dnsmasq.pid", id="dnsmasq-pid"),
         pytest.param("dns_tier", FAKE_STATE_DIR / "dns.tier", id="dns-tier"),
+        pytest.param(
+            "upstream_explicit", FAKE_STATE_DIR / "upstream.explicit", id="upstream-explicit"
+        ),
         pytest.param("container_id", FAKE_STATE_DIR / "container.id", id="container-id"),
         pytest.param("reader_pid", FAKE_STATE_DIR / READER_PID_FILENAME, id="reader-pid"),
     ],

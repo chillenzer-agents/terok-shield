@@ -24,6 +24,15 @@ SET_BYPASS_WINDOW = "bypass_window"  # timed allow-all (kernel-timeout elements)
 
 PASTA_DNS = "169.254.1.1"  # pasta default DNS forwarder (link-local)
 
+# Public fallback resolvers, pre-authorized in the ruleset preamble and offered
+# by ``dns.upstream`` as the runtime alternative when the mode-derived forwarder
+# is unusable in the container's actual netns.  The two sets MUST stay in sync:
+# the ruleset accepts exactly these, and the runtime may switch only among what
+# the ruleset accepts.  A site-specific (e.g. LAN) resolver is deliberately NOT
+# here — it has no business being pre-authorized; the explicit
+# ``TEROK_SHIELD_DNS_UPSTREAM`` override covers that and IS baked in at pre_start.
+DNS_FALLBACKS: tuple[str, ...] = ("1.1.1.1", "8.8.8.8")
+
 # pasta --map-host-loopback address: container traffic to this link-local
 # address is translated by pasta to 127.0.0.1 on the host.  Using a
 # non-loopback address avoids the pasta 2.x "two loopbacks" splice bug

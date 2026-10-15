@@ -45,8 +45,9 @@ from ..config import (
     ShieldRuntime,
     ShieldState,
 )
-from ..dns import apparmor, dnsmasq
+from ..dns import apparmor, dnsmasq, upstream as dns_upstream
 from ..nft.constants import (
+    DNS_FALLBACKS,
     DNSMASQ_BIND_DEFAULT,
     DNSMASQ_BIND_KRUN,
     NFT_SET_TIMEOUT_DNSMASQ,
@@ -168,7 +169,7 @@ class HookMode:
         dnsmasq_bin = dnsmasq.locate(self._config.dnsmasq_path, self._runner)
         tier = self._detect_dns_tier(container, sd, dnsmasq_bin)
         mode = info.network_mode or "pasta"
-        upstream_dns = _upstream_dns_for_mode(mode)
+        upstream_dns, upstream_explicit = _resolve_upstream_dns(mode)
         gw_v4, gw_v6 = self._gateways = _gateways_for_mode(mode)
 
         # Persist the launch-detected facts first: they are what ``refresh``
@@ -177,6 +178,12 @@ class HookMode:
         # later up/down rebuilds share one source.
         bundle = StateBundle(sd)
         bundle.upstream_dns.write_text(f"{upstream_dns}\n")
+        # Persist explicitness so the runtime check honours the override even
+        # when the nsenter child does not inherit the hook's environment.
+        if upstream_explicit:
+            bundle.upstream_explicit.write_text("1\n")
+        else:
+            bundle.upstream_explicit.unlink(missing_ok=True)
         bundle.dns_tier.write_text(f"{tier.value}\n")
         bundle.dnsmasq_command.write_text(f"{dnsmasq_bin}\n")
         bundle.network_mode.write_text(f"{mode}\n")
@@ -433,8 +440,12 @@ class HookMode:
     ) -> None:
         """Pre-generate the complete nft ruleset into the state bundle."""
         set_timeout = NFT_SET_TIMEOUT_DNSMASQ if tier.live else ""
+        # The mode-derived upstream plus the public fallbacks the runtime
+        # verification may switch to — without these accepts the switch would
+        # be silently firewalled under the default-deny posture.
         ruleset_builder = RulesetBuilder(
             dns=upstream_dns,
+            dns_extra=DNS_FALLBACKS,
             loopback_ports=StateBundle(sd).effective_loopback_ports(),
             gateway_v4=gw_v4,
             gateway_v6=gw_v6,
@@ -905,6 +916,7 @@ class HookMode:
         gw_v4, gw_v6 = self._gateways
         return RulesetBuilder(
             dns=dns,
+            dns_extra=DNS_FALLBACKS,
             loopback_ports=StateBundle(sd).effective_loopback_ports(),
             gateway_v4=gw_v4,
             gateway_v6=gw_v6,
@@ -999,6 +1011,31 @@ class HookMode:
 def _dnsmasq_bind(runtime: ShieldRuntime) -> str:
     """Return the dnsmasq listen address for *runtime*."""
     return DNSMASQ_BIND_KRUN if runtime is ShieldRuntime.KRUN else DNSMASQ_BIND_DEFAULT
+
+
+def _resolve_upstream_dns(network_mode: str) -> tuple[str, bool]:
+    """Pick the launch-time upstream DNS and whether it came from the env override.
+
+    The host-global network mode can disagree with the namespace a task really
+    runs in, and the mismatch produces a foreign-but-answering resolver (see
+    ``dns.upstream``).  ``TEROK_SHIELD_DNS_UPSTREAM`` is the operator/project
+    knob that short-circuits that guess: a valid IP literal wins over
+    ``_upstream_dns_for_mode`` and is honored even if the runtime probe later
+    fails.  An invalid value warns and falls back to the mode mapping — an env
+    typo must never crash the hook.
+
+    Returns ``(upstream, explicit)``; *explicit* drives the persisted marker
+    the runtime check reads.
+    """
+    explicit = dns_upstream.parse_env_upstream(os.environ.get(dns_upstream.ENV_UPSTREAM))
+    if explicit is not None:
+        logger.info(
+            "Using %s override for upstream DNS: %s",
+            dns_upstream.ENV_UPSTREAM,
+            explicit,
+        )
+        return explicit, True
+    return _upstream_dns_for_mode(network_mode), False
 
 
 def _upstream_dns_for_mode(network_mode: str) -> str:

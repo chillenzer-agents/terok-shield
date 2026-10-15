@@ -92,7 +92,7 @@ The workload cannot modify nftables rules because `CAP_NET_ADMIN` and
 **Hook mode** (per-container netns, output chain):
 
 ```text
-preamble (lo, established, DNS, infra ports, +localhost grants) → t00 hard-deny (link-local + IMDS) → t10 override → t20 security-deny (@t20_security_deny + RFC1918/RFC4193) → t30 provider allow → t40 project allow → bypass window → terminal reject (log BLOCKED)
+preamble (lo, established, primary DNS, infra ports, +localhost grants) → t00 hard-deny (link-local + IMDS) → t10 override → t20 security-deny (@t20_security_deny + RFC1918/RFC4193) → t20 DNS fallbacks (1.1.1.1/8.8.8.8) → t30 provider allow → t40 project allow → bypass window → terminal reject (log BLOCKED)
 ```
 
 **Rule ordering rationale:** tier order *is* the authority order — an
@@ -106,6 +106,17 @@ not by adding it to an allow set. The hard-deny floor (`t00`, link-local +
 destinations are rejected and logged with the `DENIED` prefix and stay denied
 across `shield up` / restarts via the security-deny tier and the `policy/live`
 overlay. The terminal rule is a `reject` (not a bare drop).
+
+The DNS plane carries one deliberate exception. The upstream forwarder's `:53`
+accept lives in the preamble, above every tier, because the mode-derived
+forwarder (`169.254.1.1` under pasta) is link-local and must survive the `t00`
+hard-deny. The explicit `TEROK_SHIELD_DNS_UPSTREAM` override is an operator
+choice to carve that same `:53` accept out of the private/hard-deny floor for
+one resolver (e.g. a site router); it refuses loopback and link-local/IMDS
+literals so it cannot reopen those floors, while a private (RFC 1918 / ULA)
+resolver is accepted by design. The runtime fallback resolvers (`1.1.1.1`,
+`8.8.8.8`) are accepted by a separate rule *below* the `t20` deny/private
+rejects, so a `shield deny` of one still wins over the fallback.
 
 ### Dual-stack (IPv4 + IPv6)
 

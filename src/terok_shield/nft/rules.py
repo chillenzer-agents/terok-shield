@@ -12,10 +12,11 @@ tier rules.  nft evaluates them top to bottom: an ``accept``/``reject`` is a
 terminal verdict (short-circuit), and a non-match falls through to the next
 tier (a ``Pass``).  Tier order *is* the authority order::
 
-    preamble          accept lo / established / DNS / infra ports
+    preamble          accept lo / established / primary DNS / infra ports
     t00 hard-deny     reject @HARD_DENY_RANGES   (link-local/IMDS — absolute)
     t10 override      accept @override           (break-glass, above the deny)
     t20 security-deny reject @deny + @PRIVATE_RANGES  (vault hosts + RFC1918)
+    t20 dns-fallback  accept extra DNS resolvers (below the deny, so a deny wins)
     t30/40 allow      accept @allow              (provider + project)
     bypass window     accept @bypass_window      (kernel-timed allow-all)
     terminal          reject (log BLOCKED)
@@ -33,7 +34,7 @@ validated before interpolation into nft commands.
 import ipaddress
 import re
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from .constants import (
@@ -104,6 +105,7 @@ class RulesetBuilder:
         self,
         *,
         dns: str = PASTA_DNS,
+        dns_extra: Sequence[str] = (),
         loopback_ports: tuple[int, ...] = (),
         gateway_v4: str = "",
         gateway_v6: str = "",
@@ -113,6 +115,8 @@ class RulesetBuilder:
 
         Args:
             dns: DNS server address (pasta default forwarder).
+            dns_extra: additional DNS addresses to accept below the deny tiers
+                — the pre-authorized fallbacks the runtime may switch to.
             loopback_ports: TCP ports to allow on the host-loopback map address.
             gateway_v4: IPv4 gateway address (e.g. slirp4netns ``10.0.2.2``).
             gateway_v6: IPv6 gateway address (e.g. slirp4netns ``fd00::2``).
@@ -124,6 +128,7 @@ class RulesetBuilder:
         if set_timeout:
             _safe_timeout(set_timeout)
         self._dns = dns
+        self._dns_extra = tuple(safe_ip(a) for a in dns_extra)
         self._loopback_ports = loopback_ports
         self._gateway_v4 = _safe_ipv4(gateway_v4) if gateway_v4 else ""
         self._gateway_v6 = _safe_ipv6(gateway_v6) if gateway_v6 else ""
@@ -145,6 +150,7 @@ class RulesetBuilder:
             self._match(TIER_OVERRIDE, "accept", ALLOWED_LOG_PREFIX),  # t10 break-glass
             self._match(TIER_SECURITY_DENY, _REJECT, DENIED_LOG_PREFIX),  # t20 deny set
             self._range_reject(PRIVATE_RANGES, PRIVATE_LOG_PREFIX),  # t20 RFC1918
+            self._dns_extra_lines(),  # t20 — fallback resolvers, below the deny
             self._match(TIER_PROVIDER_ALLOW, "accept", ALLOWED_LOG_PREFIX),  # t30 provider
             self._match(TIER_PROJECT_ALLOW, "accept", ALLOWED_LOG_PREFIX),  # t40 project
             self._match(SET_BYPASS_WINDOW, "accept", BYPASS_LOG_PREFIX),  # timed window
@@ -179,6 +185,7 @@ class RulesetBuilder:
                     self._match(TIER_OVERRIDE, "accept", BYPASS_LOG_PREFIX),
                     self._match(TIER_SECURITY_DENY, _REJECT, DENIED_LOG_PREFIX),
                     self._range_reject(PRIVATE_RANGES, PRIVATE_LOG_PREFIX),
+                    self._dns_extra_lines(),  # below the deny, so a deny still wins
                 )
             )
         sections.append(
@@ -358,7 +365,13 @@ class RulesetBuilder:
         return f"set {name} {{ type {family}; flags interval; }}"
 
     def _preamble_lines(self) -> str:
-        """Validate inputs and build the always-accept preamble (DNS + infra ports)."""
+        """Validate inputs and build the always-accept preamble (DNS + infra ports).
+
+        Only the *primary* ``dns`` accept lives here: it can be pasta's
+        link-local address, which must sit above the t00 hard-deny to survive
+        it.  The extra fallbacks are emitted by :meth:`_dns_extra_lines` below
+        the deny tiers instead.
+        """
         dns = safe_ip(self._dns)
         if self._set_timeout:
             _safe_timeout(self._set_timeout)
@@ -377,6 +390,27 @@ class RulesetBuilder:
         lp = self._loopback_port_rules(self._loopback_ports)
         if lp:
             lines.append(lp)
+        return "\n".join(lines)
+
+    def _dns_extra_lines(self) -> str:
+        """Accept ``:53`` to the fallback resolvers the runtime may switch to.
+
+        Emitted *below* the t20 security-deny and private-range rejects, not
+        in the preamble: these are public resolvers, so an operator
+        ``shield deny`` of one must still win.  The preamble sits above every
+        tier, and an accept there would silently defeat the deny invariant
+        ("an explicit deny wins over an allow").  The private-range floor
+        still applies, so a private fallback is not silently punched through
+        the RFC1918/ULA reject.  Empty when there are no extras (or every
+        extra dedupes to the primary), so the base ruleset is byte-identical.
+        """
+        primary = safe_ip(self._dns)
+        extras = [s for s in dict.fromkeys(self._dns_extra) if s != primary]
+        lines: list[str] = []
+        for server in extras:
+            dns_af = "ip" if _is_v4(server) else "ip6"
+            lines.append(f"        udp dport 53 {dns_af} daddr {server} accept")
+            lines.append(f"        tcp dport 53 {dns_af} daddr {server} accept")
         return "\n".join(lines)
 
     @staticmethod

@@ -14,6 +14,7 @@ import pytest
 from terok_shield.nft.constants import (
     BLOCKED_LOG_PREFIX,
     BYPASS_LOG_PREFIX,
+    DNS_FALLBACKS,
     HARD_DENY_RANGES,
     NFT_TABLE,
     PASTA_HOST_LOOPBACK_MAP,
@@ -174,6 +175,17 @@ def test_hook_ruleset_accepts_dns_to_the_configured_forwarder() -> None:
         f"udp dport 53 ip daddr {LINK_LOCAL_DNS} accept",
         f"tcp dport 53 ip daddr {LINK_LOCAL_DNS} accept",
     }
+
+
+def test_hook_ruleset_accepts_dns_to_preauthorized_fallbacks() -> None:
+    """dns_extra adds the pre-authorized fallback resolvers to the DNS exceptions."""
+    ruleset = RulesetBuilder(dns=LINK_LOCAL_DNS, dns_extra=DNS_FALLBACKS).build_up()
+    rules = _dns_accept_rules(ruleset)
+    assert f"udp dport 53 ip daddr {LINK_LOCAL_DNS} accept" in rules
+    assert f"tcp dport 53 ip daddr {LINK_LOCAL_DNS} accept" in rules
+    for server in DNS_FALLBACKS:
+        assert f"udp dport 53 ip daddr {server} accept" in rules
+        assert f"tcp dport 53 ip daddr {server} accept" in rules
 
 
 def test_hook_ruleset_default_tcp_rules_are_dns_only() -> None:

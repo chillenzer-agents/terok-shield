@@ -143,7 +143,53 @@ def _createruntime(pid: str, sd: Path) -> None:
     # Gateway addresses are baked into ruleset.nft by pre_start() — no
     # /proc discovery or dynamic nft set population needed.
 
+    # Verify (and if needed rewrite) the upstream DNS before dnsmasq starts.
+    _verify_upstream(pid, sd)
+
     _start_container_dnsmasq(pid, sd)
+
+
+def _verify_upstream(pid: str, sd: Path) -> None:
+    """Re-check the persisted upstream DNS from inside the container's netns.
+
+    ``pre_start`` chose the upstream from the host-global network mode, which
+    can disagree with the namespace this task actually runs in; the mismatch
+    yields a foreign-but-answering resolver that returns ``REFUSED`` for every
+    recursive name (container resolves nothing).  Re-running the selection in
+    the real netns — via ``nsenter``, the same mechanism the ruleset/dnsmasq
+    launches use — lets a functional probe pick a usable fallback and rewrite
+    the artifacts before dnsmasq reads them.
+
+    Entirely best-effort: a missing bundle, a missing installed package, an
+    unreachable ``nsenter``, or any probe failure leaves the primary upstream
+    untouched and logs.  The container must never come up without its
+    resolver artifact because this extra hardening step could not run.
+
+    An already-installed hook script from before this change (an upgrade that
+    did not re-run ``terok setup``) does not call this at all, so the runtime
+    verification is skipped silently and the fallback accepts the new
+    ``pre_start`` adds stay inert.
+    """
+    if not (sd / _oci_state.UPSTREAM_DNS_FILE_NAME).is_file():
+        return  # pre-dates the upstream file — nothing to verify
+    try:
+        # The child is the package's own netns-side helper; run it as
+        # isolated as this hook (`-I`) so it imports terok_shield from the
+        # installation's site-packages without honouring ambient PYTHONPATH.
+        _oci_state.nsenter(
+            pid,
+            sys.executable,
+            "-I",
+            "-m",
+            "terok_shield.dns.upstream",
+            str(sd),
+        )
+    except Exception as exc:  # noqa: BLE001 — hardening must not fail the start
+        _oci_state.log(
+            f"terok-shield hook: DNS upstream verification skipped ({exc}) — "
+            "keeping the persisted upstream",
+            sd / "hook-error.log",
+        )
 
 
 def _container_netns_inode(pid: str) -> int | None:
