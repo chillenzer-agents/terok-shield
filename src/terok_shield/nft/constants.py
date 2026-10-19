@@ -31,7 +31,24 @@ PASTA_DNS = "169.254.1.1"  # pasta default DNS forwarder (link-local)
 # the ruleset accepts.  A site-specific (e.g. LAN) resolver is deliberately NOT
 # here — it has no business being pre-authorized; the explicit
 # ``TEROK_SHIELD_DNS_UPSTREAM`` override covers that and IS baked in at pre_start.
-DNS_FALLBACKS: tuple[str, ...] = ("1.1.1.1", "8.8.8.8")
+# The set below is the Kuketz Empfehlungsecke DNS list (privacy-friendly,
+# no-log resolvers), restricted to providers that answer *plain DNS on port 53*
+# — the runtime probe speaks UDP DNS, so its DoT/DoH-only entries (Digitalcourage,
+# dismail, AdGuard, Digitale Gesellschaft, UncensoredDNS) cannot be used here.
+# 1.1.1.1 and 8.8.8.8 follow as the last resort.
+#   https://www.kuketz-blog.de/empfehlungsecke/#dns
+DNS_FALLBACKS: tuple[str, ...] = (
+    "176.9.93.198",      # dnsforge.de (DE, no logs; ad/tracker block)
+    "176.9.1.117",       # dnsforge.de (secondary)
+    "49.12.222.213",     # hard.dnsforge.de (DE, strict block)
+    "88.198.122.154",    # hard.dnsforge.de (secondary)
+    "5.1.66.255",        # dot.ffmuc.net (DE, no filter)
+    "185.150.99.255",    # dot.ffmuc.net (secondary)
+    "9.9.9.9",           # Quad9 (no logs; malware block)
+    "149.112.112.112",   # Quad9 (secondary)
+    "1.1.1.1",           # Cloudflare (last resort)
+    "8.8.8.8",           # Google (last resort)
+)
 
 # pasta --map-host-loopback address: container traffic to this link-local
 # address is translated by pasta to 127.0.0.1 on the host.  Using a
