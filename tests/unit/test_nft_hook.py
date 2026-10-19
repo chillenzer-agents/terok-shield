@@ -1201,6 +1201,39 @@ def test_createruntime_skips_ip_add_for_loopback_bind(tmp_path: Path) -> None:
         assert "addr" not in str(call.args), f"unexpected ip addr call: {call.args}"
 
 
+def test_createruntime_clears_stale_dnsmasq_pid_and_log(tmp_path: Path) -> None:
+    """A re-created container must not inherit a prior dnsmasq's pid/log.
+
+    The old dnsmasq wrote them as the container's mapped root, so on a
+    re-create they can be owned by an incompatible (sub)uid and the new
+    dnsmasq aborts on ``open(log)`` with EACCES/EPERM.  The hook must clear
+    both before launch, and must not mistake the stale pid for a live one.
+    """
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    (sd / "ruleset.nft").write_text("table inet terok_shield {}")
+    (sd / "dnsmasq.conf").write_text("listen-address=127.0.0.1\nport=53\nbind-interfaces\n")
+    (sd / "dnsmasq.command").write_text("dnsmasq\n")
+    (sd / "dnsmasq.pid").write_text("999\n")
+    (sd / "dnsmasq.log").write_text("stale query from a previous container\n")
+
+    def _fake_nsenter(*args: object, **kwargs: object) -> None:
+        if any("conf-file" in str(a) for a in args):
+            (sd / "dnsmasq.pid").write_text("42\n")
+
+    with (
+        mock.patch("terok_shield.resources._oci_state.nsenter", side_effect=_fake_nsenter),
+        mock.patch(
+            "terok_shield.resources._oci_state.is_our_dnsmasq",
+            side_effect=lambda pid, _sd, **_kw: pid == 42,
+        ),
+    ):
+        nft_hook._createruntime("1", sd)
+
+    assert not (sd / "dnsmasq.log").exists(), "stale query log was not cleared"
+    assert (sd / "dnsmasq.pid").read_text().strip() == "42"
+
+
 def test_createruntime_adds_link_local_for_krun_bind(tmp_path: Path) -> None:
     """Non-loopback dnsmasq binds (krun runtime) get ``ip addr add`` in-netns.
 

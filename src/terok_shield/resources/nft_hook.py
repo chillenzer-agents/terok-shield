@@ -26,6 +26,7 @@ import contextlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -248,12 +249,14 @@ def _start_container_dnsmasq(pid: str, sd: Path) -> None:
     if bind and not bind.startswith("127."):
         _oci_state.add_local_ip(pid, bind)
 
-    # Remove stale PID file so the post-launch check is not fooled by a
-    # leftover from a previous run (mirrors dnsmasq.launch()).
-    try:
-        pid_file.unlink()
-    except OSError:
-        pass
+    # Clear stale pid/log from a previous dnsmasq incarnation before launch.
+    # dnsmasq writes both as the container's mapped root, so on a re-created
+    # container they can be owned by an incompatible (sub)uid: the fresh
+    # dnsmasq then fails to open its log with EACCES/EPERM, and a leftover pid
+    # file fools the post-launch identity check.  Unlink only needs write
+    # access to the (operator-owned) state dir; if even that fails, escalate
+    # through `podman unshare`.
+    _clear_stale_dnsmasq_files(sd)
 
     binary = _oci_state.find_dnsmasq(sd)
     (sd / _oci_state.DNSMASQ_BIN_FILE_NAME).write_text(binary + "\n")
@@ -270,6 +273,54 @@ def _start_container_dnsmasq(pid: str, sd: Path) -> None:
         raise RuntimeError(
             f"dnsmasq PID {dnsmasq_pid} is not the expected process. "
             "The container's DNS may not be functional."
+        )
+
+
+def _clear_stale_dnsmasq_files(sd: Path) -> None:
+    """Remove a previous dnsmasq's pid and query log before a fresh start.
+
+    A re-created container reuses the task's shield dir.  The old dnsmasq ran
+    as the container's mapped root, so ``dnsmasq.pid``/``dnsmasq.log`` may be
+    owned by a uid the caller cannot write; dnsmasq then aborts on
+    ``open(log)`` with EACCES/EPERM and the container's DNS is dead.  Unlink
+    needs write access only to the parent (operator-owned) directory, so it
+    normally succeeds; when it does not, retry as root in the rootless userns.
+    """
+    for name in (_oci_state.DNSMASQ_PID_FILE_NAME, _oci_state.DNSMASQ_LOG_FILE_NAME):
+        path = sd / name
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _oci_state.log(
+                f"createruntime: unlinking stale {name} failed ({exc}); "
+                "retrying via 'podman unshare'",
+                sd / "hook-error.log",
+            )
+            _remove_via_unshare(path, exc)
+
+
+def _remove_via_unshare(path: Path, orig: OSError) -> None:
+    """Remove *path* as root inside the rootless userns (stale dnsmasq file)."""
+    cmd = [_oci_state.find_podman(), "unshare", "rm", "-f", str(path)]
+    try:
+        result = subprocess.run(  # noqa: S603  # nosec B603
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"cannot remove stale dnsmasq file {path} ({orig}); "
+            f"remove it manually: podman unshare rm -f {path}"
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr + result.stdout).strip()
+        raise RuntimeError(
+            f"cannot remove stale dnsmasq file {path} ({orig}); "
+            f"'podman unshare rm -f' failed: {detail} — remove it manually"
         )
 
 

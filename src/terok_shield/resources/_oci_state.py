@@ -86,6 +86,9 @@ DNSMASQ_CONF_FILE_NAME = "dnsmasq.conf"
 DNSMASQ_PID_FILE_NAME = "dnsmasq.pid"
 """PID of the per-container dnsmasq, written by dnsmasq itself."""
 
+DNSMASQ_LOG_FILE_NAME = "dnsmasq.log"
+"""Query log written by the per-container dnsmasq (consumed by ``shield watch``)."""
+
 DNSMASQ_BIN_FILE_NAME = "dnsmasq.bin"
 """Actual executable of the live dnsmasq, used only for process identity."""
 
