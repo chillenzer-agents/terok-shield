@@ -48,7 +48,7 @@ import struct
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from ..nft.constants import DNS_FALLBACKS, SLIRP4NETNS_DNS
+from ..nft.constants import DNS_FALLBACKS, PASTA_DNS, SLIRP4NETNS_DNS
 from ..state import StateBundle
 
 logger = logging.getLogger(__name__)
@@ -355,6 +355,17 @@ def runtime_main(argv: Sequence[str] | None = None) -> int:
         probe=probe_upstream,
         explicit=explicit,
     )
+    if not explicit and chosen == primary and primary in (PASTA_DNS, SLIRP4NETNS_DNS):
+        # The probe could not verify anything — typically because it runs at
+        # createRuntime before the task's netns has usable egress.  Keeping a
+        # mode-derived forwarder that belongs to a *different* netns guarantees
+        # broken DNS; prefer the first pre-authorized fallback even unverified.
+        # It becomes usable once the container is up, and a wrong choice is
+        # still less harmful than a link-local address with no route.
+        candidates = candidate_upstreams(primary)
+        if candidates:
+            chosen = candidates[0]
+            reason = "probe unverified; using first pre-authorized fallback"
     if chosen != primary:
         _rewrite_artifacts(args.state_dir, chosen)
         bundle.upstream_dns.write_text(f"{chosen}\n")

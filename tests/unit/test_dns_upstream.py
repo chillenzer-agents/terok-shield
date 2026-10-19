@@ -342,21 +342,43 @@ def test_runtime_rewrite_fixes_resolv_conf_for_lookup_tier(tmp_path: Path) -> No
     assert bundle.resolv_conf.read_text().startswith("nameserver 1.1.1.1\n")
 
 
-def test_runtime_main_keeps_primary_when_nothing_usable(
+def test_runtime_main_uses_first_fallback_for_mode_derived_primary_when_unverified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unusable primary with no candidates leaves upstream.dns untouched and returns 0."""
+    """An unverifiable mode-derived forwarder is replaced by the first fallback.
+
+    The create-time probe can run before the task netns has usable egress;
+    keeping the pasta link-local address would then leave DNS broken, so the
+    first pre-authorized fallback is used (unverified) instead.
+    """
     bundle = StateBundle(tmp_path)
     bundle.ensure_dirs()
     bundle.upstream_dns.write_text("169.254.1.1\n")
     bundle.dns_tier.write_text("dnsmasq-live\n")
-    bundle.dnsmasq_conf.write_text(_DNSMASQ_CONF)
+    bundle.dnsmasq_conf.write_text("server=169.254.1.1\n")
     monkeypatch.delenv(upstream.ENV_UPSTREAM, raising=False)
     monkeypatch.setattr(upstream, "probe_upstream", lambda *_a, **_k: False)
 
     assert upstream.runtime_main([str(tmp_path)]) == 0
-    assert bundle.upstream_dns.read_text().strip() == "169.254.1.1"
-    assert "server=169.254.1.1" in bundle.dnsmasq_conf.read_text()
+    assert bundle.upstream_dns.read_text().strip() == DNS_FALLBACKS[0]
+    assert f"server={DNS_FALLBACKS[0]}" in bundle.dnsmasq_conf.read_text()
+
+
+def test_runtime_main_keeps_non_mode_primary_when_nothing_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-mode-derived primary is kept when nothing verifies (no blind switch)."""
+    bundle = StateBundle(tmp_path)
+    bundle.ensure_dirs()
+    bundle.upstream_dns.write_text("198.51.100.1\n")
+    bundle.dns_tier.write_text("dnsmasq-live\n")
+    bundle.dnsmasq_conf.write_text("server=198.51.100.1\n")
+    monkeypatch.delenv(upstream.ENV_UPSTREAM, raising=False)
+    monkeypatch.setattr(upstream, "probe_upstream", lambda *_a, **_k: False)
+
+    assert upstream.runtime_main([str(tmp_path)]) == 0
+    assert bundle.upstream_dns.read_text().strip() == "198.51.100.1"
+    assert "server=198.51.100.1" in bundle.dnsmasq_conf.read_text()
 
 
 def test_runtime_main_honors_persisted_explicit_marker(
